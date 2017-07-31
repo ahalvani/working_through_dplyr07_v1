@@ -1,0 +1,283 @@
+---
+title: "Understanding Hadley's new eval framework in dplyr 0.7"
+output:
+  html_document: default
+  html_notebook: default
+  pdf_document: default
+---
+
+```{r}
+library(dplyr)
+```
+
+Writing a function using dplyr is hard if you want one of the arguments to be a variable name (like x) or an expression (like x + y). Because dplyr automatically “quotes” those inputs (arguements) rather than evaluating them, they are not referentially transparent. That means you can’t replace a value with a seemingly equivalent object that you’ve defined elsewhere. This makes it hard to create functions with arguments that change how dplyr verbs are computed.
+
+We need a function that captures the expression and its environment: `quo()`. `quo()` works like "", it quotes its input rather than evaluating it, and returns a quosure, which is a special type of formula. We then need to tell dplyr not to quote its input, because it has been pre-quoted. Yet another way of saying the same thing is that we want to unquote the arguement quoted by quo(). In dplyr (and in tidyeval in general) you use !! to say that you want to unquote an input so that it’s evaluated, not quoted. This gives us a function that actually does what we want.  
+
+# Varying input interactively- `quo()` and `!!`
+```{r}
+cars <- data.frame( 
+  body_color = c("blue", "black", "blue", "blue", "black", "red"), 
+  inside_color = c("tan", "black", "cyan", "white", "white","pink"),
+  car_id = 1:6)
+cars
+```
+
+
+To *filter* for a hard-coded value, you would write
+```{r}
+filter(cars, body_color == "blue")
+```
+
+To vary the value you filter for, you can:
+```{r}
+val <- 'black'
+filter(cars, body_color == val)
+```
+To set the *column* interactively, use `quo()` to quote the column and its environment, then unquote the column name in `filter` with `!!`. Note that "!!" substitution requires parenthesis to safely bind (so the notation is actually "(!! )", not "!!")
+```{r}
+val <- 'blue'
+col_name <- quo(body_color)
+cars %>% filter((!!col_name) == val)
+```
+# Passing a single arguement to dplyr inside a function - `enquo()`
+Inside functions, you use *enquo()* instead of *quo()* Let’s see how this works with *`group_by()`* to vary the grouping variable for a data summarization.
+
+```{r}
+df <- tibble(
+  g1 = c(1, 1, 2, 2, 2),
+  g2 = c(1, 2, 1, 2, 1),
+  a = sample(5), 
+  b = sample(5)
+)
+
+df
+```
+
+Interactively, you can group by any variable using code like this:
+
+```{r}
+df %>%
+  group_by(g1) %>%
+  summarise(a = mean(a))
+```
+
+A naive approach to writing a function that would group by a variable might look like this:
+```{r naive_interp, eval=FALSE}
+my_summarise <- function(df, group_var) {
+  df %>%
+    group_by(group_var) %>%
+    summarise(a = mean(a))
+}
+
+my_summarise(df, g1)
+```
+It doesn't- instead, the following does:
+```{r}
+my_summarise <- function(df, group_by_var) {
+  group_by_var <- enquo(group_by_var)
+
+  df %>%
+    group_by(!!group_by_var) %>%
+    summarise(a = mean(a))
+}
+
+my_summarise(df, g1)
+```
+
+What makes this work is two things:
+
+* We quote the input ourselves using `enquo()` so `my_summarise()` can take a bare variable name just like `group_by()`
+* We tell `group_by()` not to quote its input using `!!` because we’ve done the quoting already with `enquo()`
+
+# Passing an arguement to filter() inside a function
+Going back to filter, we can use `enquo()` and `!!` to vary the column we filter by, passing the value as an arguement as well
+```{r}
+simpleFunction <- function(dataset, col_name, value){
+  col_name <- enquo(col_name)
+  dataset %>%
+    filter((!!col_name) == value) %>%
+    summarise(mean_cyl = mean(cyl)) -> dataset
+  return(dataset)
+}
+
+simpleFunction(mtcars, am, 1)
+```
+
+Again notice it's `filter((!!col_name) == value)` and not `filter(!!col_name == value)`
+
+Another example from stackoverflow
+```{r}
+df2 <- data.frame( 
+  color = c("blue", "black", "blue", "blue", "black"), 
+  value = 1:5)
+
+filter_col <- function(df, col_name, val){
+  col_name <- enquo(col_name)
+  df %>% filter((!!col_name) == val)
+}
+filter_col(df2, color, 'blue')
+```
+
+
+# Passing two arguements- varying both the grouping variable and input variable 
+You can use similar logic to vary the input variable:
+```{r}
+my_summarise <- function(df, group_by_var, input_var) {
+  group_by_var <- enquo(group_by_var)
+  input_var <- enquo(input_var)
+  
+  df %>%
+    group_by(!!group_by_var) %>%
+    summarise(a = mean(!!input_var))
+}
+
+my_summarise(df, g1, a)
+```
+
+You notice that the new variable name is fixed whether you are summarising a or b- you can solve this by making the new variable name independant from the input variable name, like this:
+
+```{r}
+my_summarise <- function(df, group_by_var, input_var) {
+  group_by_var <- enquo(group_by_var)
+  input_var <- enquo(input_var)
+  
+  df %>%
+    group_by(!!group_by_var) %>%
+    summarise(mean_var = mean(!!input_var))
+}
+
+my_summarise(df, g1, a)
+```
+
+# Using passed arguements to vary the names of new variables- `quo_name()` and `:=`
+A much more elegant solution would be to vary the new variable name based on the input variable given to the function. This is acheived as follows:
+
+```{r}
+my_summarise <- function(df, group_by_var, input_var) {
+  
+  # Grouping variable
+  group_by_var <- enquo(group_by_var)
+  
+  # Input variable
+  input_var <- enquo(input_var)
+  
+  # New variable names
+  name_mean_input_var <- paste0("mean_", quo_name(input_var))
+  
+  df %>%
+    group_by(!!group_by_var) %>%
+    summarise(
+      !!name_mean_input_var := mean(!!input_var))
+}
+
+my_summarise(df, g1, a)
+```
+
+This code is similar to the previous example, but there are two new wrinkles:
+
+* We create the new names by pasting together strings, so we need `quo_name()` to **convert the input expression to a string**.
+
+* `!!mean_name = mean(!!expr)` isn’t valid R code, so we need to use the `:=` helper provided by rlang. ":=" is needed to make left-hand-side re-mapping possible 
+
+Another example using mutate, performing two functions on a single input variable
+
+```{r}
+
+d <- data.frame(a=c(1,2,3), 
+                b=c(4,5,6),
+                c=c(7,8,9))
+
+my_mutate_1 <- function(df, expr) {
+  expr <- enquo(expr)
+  mean_name <- paste0("mean_", quo_name(expr))
+  sum_name <- paste0("sum_", quo_name(expr))
+
+  mutate(df, 
+    !!mean_name := mean(!!expr), 
+    !!sum_name := sum(!!expr)
+  )
+}
+
+my_mutate_1 (d, a)
+
+my_mutate_1(d,b)
+
+```
+
+A mutate example with two input variables
+```{r}
+
+d <- data.frame(a=c(1,2,3), 
+                b=c(4,5,6),
+                c=c(7,8,9))
+
+my_mutate_2 <- function(df, expr_1, expr_2) {
+  expr_1 <- enquo(expr_1)
+  expr_2 <- enquo(expr_2)
+
+  name_sum_vars <- paste0("sum_vars_", quo_name(expr_1),"_", quo_name(expr_2))
+  name_mult_vars <- paste0("mult_vars_", quo_name(expr_1),"_", quo_name(expr_2))
+  
+  mutate(df, 
+    !!name_sum_vars := (!!expr_1) + (!!expr_2), 
+    !!name_mult_vars := (!!expr_1) * (!!expr_2)
+  )
+}
+
+my_mutate_2 (d, a, b)
+
+my_mutate_2 (d, a, c)
+
+```
+
+# Passing multiple arguements to group_by(): `quos()` and `!!!` 
+```{r}
+my_summarise <- function(df, ...) {
+  group_by_vars <- quos(...)
+
+  df %>%
+    group_by(!!!group_by_vars) %>%
+    summarise(a = mean(a))
+}
+
+df
+my_summarise(df, g1, g2)
+```
+
+
+
+#### Bonus- recoding with case-when
+
+```{r}
+mtcars %>%
+    mutate(carb_new = case_when(carb == 1 ~ "one",
+                                carb == 2 ~ "two",
+                                carb == 4 ~ "four",
+                                TRUE ~ "other")) %>%
+    head(5)
+```
+
+
+# References
+
+#### Hadley's original tutorial on which this document is based 
+http://dplyr.tidyverse.org/articles/programming.html
+
+#### Non-Standard Evaluation and Function Composition in R
+http://www.win-vector.com/blog/2017/06/non-standard-evaluation-and-function-composition-in-r/
+
+#### Dplyr 0.7 on the Econometrics and Free Software website
+http://www.brodrigues.co/blog/2017-06-19-dplyr-0-70-tutorial/
+
+#### Chunck options
+https://yihui.name/knitr/options/
+
+#### RMarkdown basics 
+http://rmarkdown.rstudio.com/authoring_basics.html 
+
+#### case when
+http://www.brodrigues.co/blog/2017-06-19-dplyr-0-70-tutorial/ 
+
+#### Other references 
+https://github.com/tidyverse/rlang/issues/116 
