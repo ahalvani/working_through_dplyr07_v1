@@ -10,6 +10,8 @@ output:
 library(dplyr)
 ```
 
+Test
+
 Writing a function using dplyr is hard if you want one of the arguments to be a variable name (like x) or an expression (like x + y). Because dplyr automatically “quotes” those inputs (arguements) rather than evaluating them, they are not referentially transparent. That means you can’t replace a value with a seemingly equivalent object that you’ve defined elsewhere. This makes it hard to create functions with arguments that change how dplyr verbs are computed.
 
 We need a function that captures the expression and its environment: `quo()`. `quo()` works like "", it quotes its input rather than evaluating it, and returns a quosure, which is a special type of formula. We then need to tell dplyr not to quote its input, because it has been pre-quoted. Yet another way of saying the same thing is that we want to unquote the arguement quoted by quo(). In dplyr (and in tidyeval in general) you use !! to say that you want to unquote an input so that it’s evaluated, not quoted. This gives us a function that actually does what we want.  
